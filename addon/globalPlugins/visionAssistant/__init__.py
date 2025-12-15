@@ -18,11 +18,13 @@ import ctypes
 import re
 import tempfile
 import time
+import wave
 import gc
 import tones
 import scriptHandler
-import markdown # Added standard library
+import markdown
 from urllib import request, error
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 addonHandler.initTranslation()
@@ -32,11 +34,25 @@ ADDON_NAME = addonHandler.getCodeAddon().manifest["summary"]
 # --- Configuration ---
 
 MODELS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash"
+    # --- 1. Recommended (Auto-Updating) ---
+    # Translators: AI Model info. [Auto] = Automatic updates. (Latest) = Newest version.
+    (_("[Auto]") + " Gemini Flash " + _("(Latest)"), "gemini-flash-latest"),
+    (_("[Auto]") + " Gemini Flash Lite " + _("(Latest)"), "gemini-flash-lite-latest"),
+
+    # --- 2. Current Standard (Free & Fast) ---
+    # Translators: AI Model info. [Free] = Generous usage limits.
+    (_("[Free]") + " Gemini 2.5 Flash", "gemini-2.5-flash"),
+    (_("[Free]") + " Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
+
+    # --- 3. High Intelligence (Paid/Pro/Preview) ---
+    # Translators: AI Model info. [Pro] = High intelligence/Paid. (Preview) = Experimental version.
+    (_("[Pro]") + " Gemini 3.0 Pro " + _("(Preview)"), "gemini-3-pro-preview"),
+    (_("[Pro]") + " Gemini 2.5 Pro", "gemini-2.5-pro"),
+
+    # --- 4. Legacy (Older Versions) ---
+    # Translators: AI Model info. [Legacy] = Older versions.
+    (_("[Legacy]") + " Gemini 2.0 Flash", "gemini-2.0-flash"),
+    (_("[Legacy]") + " Gemini 2.0 Flash Lite", "gemini-2.0-flash-lite"),
 ]
 
 BASE_LANGUAGES = [
@@ -57,7 +73,7 @@ TARGET_NAMES = [x[0] for x in TARGET_LIST]
 confspec = {
     "proxy_url": "string(default='')",
     "api_key": "string(default='')",
-    "model_name": "string(default='gemini-2.5-flash-lite')",
+    "model_name": "string(default='gemini-flash-lite-latest')",
     "target_language": "string(default='English')",
     "source_language": "string(default='Auto-detect')",
     "ai_response_language": "string(default='English')",
@@ -163,29 +179,24 @@ def process_tiff_pages(path):
     return pages_data
 
 PROMPT_TRANSLATE = """
-Role: Translation Logic Engine.
+Task: Translate the text below.
 
-Parameters:
-- Primary Target Language: "{target_lang}"
-- Auto-Swap Enabled: {smart_swap}
-- Fallback Language (Swap Target): "{swap_target}"
+Configuration:
+- Target Language: "{target_lang}"
+- Swap Language: "{swap_target}"
+- Smart Swap: {smart_swap}
+
+Rules:
+1. DEFAULT: Translate the input strictly to "{target_lang}".
+2. EXCEPTION: If (and ONLY if) the input is already completely in "{target_lang}" AND "Smart Swap" is True, then translate to "{swap_target}".
+
+Constraints:
+- Output ONLY the translation.
+- Do NOT explain your logic or add notes.
+- Do NOT translate technical terms, code, or protocol names.
 
 Input Text:
-===
 {text_content}
-===
-
-Algorithm:
-1. DETECT the language of the Input Text.
-2. DECIDE the output language based on these rules:
-   - IF (Auto-Swap is True) AND (Detected Language is {target_lang}):
-     -> Output Language = {swap_target}
-   - ELSE:
-     -> Output Language = {target_lang}
-
-3. EXECUTE translation:
-   - Translate the Input Text to the decided Output Language.
-   - Return ONLY the translation. No notes, no explanations.
 """
 
 PROMPT_UI_LOCATOR = "Analyze UI (Size: {width}x{height}). Request: '{query}'. Output JSON: {{\"x\": int, \"y\": int, \"found\": bool}}."
@@ -470,10 +481,17 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.apiKey = cHelper.addLabeledControl(_("Gemini API Key:"), wx.TextCtrl)
         self.apiKey.Value = config.conf["VisionAssistant"]["api_key"]
         
+        model_display_names = [opt[0] for opt in MODELS]
+        
         # Translators: Label for Model selection
-        self.model = cHelper.addLabeledControl(_("AI Model:"), wx.Choice, choices=MODELS)
-        try: self.model.SetSelection(MODELS.index(config.conf["VisionAssistant"]["model_name"]))
-        except: self.model.SetSelection(0)
+        self.model = cHelper.addLabeledControl(_("AI Model:"), wx.Choice, choices=model_display_names)
+        
+        current_id = config.conf["VisionAssistant"]["model_name"]
+        try:
+            index = next(i for i, v in enumerate(MODELS) if v[1] == current_id)
+            self.model.SetSelection(index)
+        except StopIteration:
+            self.model.SetSelection(0)
 
         # Translators: Label for Proxy URL input
         self.proxyUrl = cHelper.addLabeledControl(_("Proxy URL:"), wx.TextCtrl)
@@ -556,7 +574,8 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 
     def onSave(self):
         config.conf["VisionAssistant"]["api_key"] = self.apiKey.Value.strip()
-        config.conf["VisionAssistant"]["model_name"] = MODELS[self.model.GetSelection()]
+        # Save the Model ID (second element of the tuple), not the display name
+        config.conf["VisionAssistant"]["model_name"] = MODELS[self.model.GetSelection()][1]
         config.conf["VisionAssistant"]["proxy_url"] = self.proxyUrl.Value.strip()
         config.conf["VisionAssistant"]["source_language"] = SOURCE_NAMES[self.sourceLang.GetSelection()]
         config.conf["VisionAssistant"]["target_language"] = TARGET_NAMES[self.targetLang.GetSelection()]
@@ -651,11 +670,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
         try:
             file_size = os.path.getsize(file_path)
+            
+            filename = os.path.basename(file_path)
+            safe_filename = quote(filename)
+            
             headers = {
                 "X-Goog-Upload-Protocol": "raw",
                 "X-Goog-Upload-Command": "start, upload, finalize",
                 "X-Goog-Upload-Header-Content-Length": str(file_size),
-                "X-Goog-Upload-File-Name": os.path.basename(file_path),
+                "X-Goog-Upload-File-Name": safe_filename,
                 "Content-Type": mime_type
             }
             
@@ -833,6 +856,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _thread_dictation(self):
         try:
             if not os.path.exists(self.temp_audio_file): return
+            
+            try:
+                with wave.open(self.temp_audio_file, "rb") as wave_file:
+                    frame_rate = wave_file.getframerate()
+                    n_frames = wave_file.getnframes()
+                    duration = n_frames / float(frame_rate)
+                
+                if duration < 1.0:
+                    # Translators: Message reported when the AI detects silence or empty speech
+                    msg = _("No speech detected.")
+                    wx.CallAfter(self.report_status, msg)
+                    try: os.remove(self.temp_audio_file)
+                    except: pass
+                    return
+            except Exception:
+                pass
+
             with open(self.temp_audio_file, "rb") as f:
                 audio_data = base64.b64encode(f.read()).decode('utf-8')
             
@@ -1178,12 +1218,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if file_uri:
             att = [{'mime_type': mime_type, 'file_uri': file_uri}]
             
-            res = self._call_gemini_safe("Extract all text from this file as plain text. Do not use JSON or bounding boxes.", attachments=att)
+            p = "Extract all visible text from this file. Preserve original formatting (headings, lists, tables) using Markdown. Output ONLY the extracted text, without any introductory or concluding remarks."
+            
+            res = self._call_gemini_safe(p, attachments=att)
             if res:
-                self.current_status = _("Idle") # Reset status on success
                 wx.CallAfter(self._open_doc_chat_dialog, res, att, "", res)
         else:
-            self.current_status = _("Idle") # Reset status on failure
+            pass
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Allows asking questions about a selected document (PDF/Text/Image)."))
@@ -1216,18 +1257,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         
     def _open_doc_chat_dialog(self, init_msg, initial_attachments, doc_text, raw_text_for_save=None):
         if self.doc_dlg:
-            try: self.doc_dlg.Destroy()
+            try: 
+                self.doc_dlg.Destroy()
             except: pass
+            self.doc_dlg = None
 
         def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             atts = ctx_atts if ctx_atts else []
             
-            current_user_msg = {"role": "user", "parts": [{"text": f"{q} (STRICTLY Respond in {lang})"}]}
+            system_instr = (
+                f"STRICTLY Respond in {lang}. "
+                "Use Markdown formatting (bold, headings, lists). "
+                "Analyze both text and visual elements (images/charts) to answer the request."
+            )
+            
+            full_prompt = f"{q}\n\n[{system_instr}]"
+            
+            current_user_msg = {"role": "user", "parts": [{"text": full_prompt}]}
             
             messages = []
             if not history:
-                parts = [{"text": f"Analyze this file. {q} (Respond in {lang})"}]
+                parts = [{"text": f"Analyze this content. {full_prompt}"}]
                 for att in atts:
                     if 'file_uri' in att:
                         parts.append({"file_data": {"mime_type": att['mime_type'], "file_uri": att['file_uri']}})
@@ -1277,7 +1328,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _thread_vision(self, img, w, h):
         lang = config.conf["VisionAssistant"]["ai_response_language"]
-        p = f"Analyze this image and describe it. Language: {lang}. Ensure the response is strictly in {lang}."
+        
+        p = (
+            f"Analyze this image. Describe the layout, visible text, and UI elements. "
+            f"Use Markdown formatting (headings, lists) to organize the description. "
+            f"Language: {lang}. Ensure the response is strictly in {lang}. "
+            "IMPORTANT: Start directly with the description content. Do not add introductory sentences like 'Here is the analysis' or 'The image shows'."
+        )
+        
         att = [{'mime_type': 'image/png', 'data': img}]
         res = self._call_gemini_safe(p, attachments=att)
         if res:

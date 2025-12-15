@@ -21,15 +21,15 @@ Features:
 - Audio Transcription (NVDA+Ctrl+Shift+A)
 - File Selection & OCR (NVDA+Ctrl+Shift+F)
 - Status Reporting (NVDA+Ctrl+Shift+I)"""),
-    addon_version="2.9.0",
+    addon_version="3.0.0",
     # Brief changelog for this version
     # Translators: what's new content for the add-on version to be shown in the add-on store
-    addon_changelog=_("""## Changes for 2.9
-*   **Added French and Turkish translations.**
-*   **Formatted View:** Added a "View Formatted" button to view chat with HTML styling.
-*   **Markdown Setting:** Added "Clean Markdown in Chat" option to view raw output.
-*   **Dialog Management:** Fixed focus issues and prevented duplicate windows.
-*   **UX Improvements:** Standardized file dialogs and removed redundant speech messages."""),
+    addon_changelog=_("""## Changes for 3.0
+*   **New Languages:** Added Persian and Vietnamese translations.
+*   **Expanded AI Models:** Reorganized models with [Free]/[Pro] prefixes and added Gemini 3.0.
+*   **Dictation Stability:** Improved silence detection and added audio duration checks.
+*   **File Handling:** Fixed uploads for files with non-English names.
+*   **Prompt Optimization:** Improved Translation logic and structured Vision results."""),
     addon_author="Mahmood Hozhabri",
     addon_url="https://github.com/mahmoodhozhabri/VisionAssistantPro",
     addon_sourceURL="https://github.com/mahmoodhozhabri/VisionAssistantPro",
