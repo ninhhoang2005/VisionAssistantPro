@@ -6,10 +6,10 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: VisionAssistant 2.9.0\n"
+"Project-Id-Version: VisionAssistant 3.0.0\n"
 "Report-Msgid-Bugs-To: nvda-translations@groups.io\n"
 "POT-Creation-Date: 2025-12-14 14:22+0000\n"
-"PO-Revision-Date: 2025-12-15 15:42+0700\n"
+"PO-Revision-Date: 2025-12-16 08:19+0700\n"
 "Last-Translator: \n"
 "Language-Team: \n"
 "Language: vi\n"
@@ -17,6 +17,43 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "X-Generator: Poedit 3.8\n"
+
+#. --- 1. Recommended (Auto-Updating) ---
+#. Translators: AI Model info. [Auto] = Automatic updates. (Latest) = Newest version.
+#: addon/globalPlugins/visionAssistant/__init__.py:39
+#: addon/globalPlugins/visionAssistant/__init__.py:40
+msgid "[Auto]"
+msgstr "[tự động]"
+
+#: addon/globalPlugins/visionAssistant/__init__.py:39
+#: addon/globalPlugins/visionAssistant/__init__.py:40
+msgid "(Latest)"
+msgstr "(Mới nhất)"
+
+#. --- 2. Current Standard (Free & Fast) ---
+#. Translators: AI Model info. [Free] = Generous usage limits.
+#: addon/globalPlugins/visionAssistant/__init__.py:44
+#: addon/globalPlugins/visionAssistant/__init__.py:45
+msgid "[Free]"
+msgstr "[Miễn phí]"
+
+#. --- 3. High Intelligence (Paid/Pro/Preview) ---
+#. Translators: AI Model info. [Pro] = High intelligence/Paid. (Preview) = Experimental version.
+#: addon/globalPlugins/visionAssistant/__init__.py:49
+#: addon/globalPlugins/visionAssistant/__init__.py:50
+msgid "[Pro]"
+msgstr "[Pro]"
+
+#: addon/globalPlugins/visionAssistant/__init__.py:49
+msgid "(Preview)"
+msgstr "(Xem trước)"
+
+#. --- 4. Legacy (Older Versions) ---
+#. Translators: AI Model info. [Legacy] = Older versions.
+#: addon/globalPlugins/visionAssistant/__init__.py:54
+#: addon/globalPlugins/visionAssistant/__init__.py:55
+msgid "[Legacy]"
+msgstr "[Legacy]"
 
 #. Translators: Title of the error dialog box
 #: addon/globalPlugins/visionAssistant/__init__.py:132

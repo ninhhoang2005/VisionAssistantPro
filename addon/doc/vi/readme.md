@@ -60,6 +60,14 @@ tạo lệnh trong cài đặt: `Name:Prompt Text` (tách biệt với `|` hoặ
 
 **Lưu ý:** File tải lên giới hạn đến 15MB. yêu cầu internet. Nhiều-trang TIFFs hỗ trợ.
 
+## THAY ĐỔI CHO 3.0
+
+*   **NGÔN NGỮ MỚI:** đã thêm bản dịch  **Persian** VÀ **Vietnamese** 
+*   **Mô hình AI mở rộng:Sắp xếp lại danh sách lựa chọn model với các tiền tố rõ ràng (`[Free]`, `[Pro]`, `[Auto]`) để giúp người dùng phân biệt giữa model miễn phí và model có giới hạn (trả phí). Đã thêm hỗ trợ cho **Gemini 3.0 Pro** and **Gemini 2.0 Flash Lite**.
+*   **tính ổn định của đọc chính tả thông minh:** Cải thiện đáng kể độ ổn định của Đọc chính tả thông minh. Đã thêm tính năng kiểm tra an toàn để bỏ qua các đoạn âm thanh ngắn hơn 1 giây, ngăn ngừa ảo giác AI và lỗi trống.
+*   **sử lí File:** Đã khắc phục sự cố tải lên tệp có tên không phải tiếng Anh không thành công.
+*   **tối ưu hóa Prompt:** Cải thiện logic dịch và kết quả hỗ trợ nhìn có cấu trúc.
+
 ## Thay đổi cho phiên bản 2.9
 
 *   **Đã thêm bản dịch tiếng Pháp và tiếng Thổ Nhĩ Kỳ.**
