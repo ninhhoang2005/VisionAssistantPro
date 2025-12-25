@@ -13,22 +13,19 @@ import tempfile
 import time
 import wave
 import gc
-from contextlib import contextmanager
 from urllib import request, error
 from urllib.parse import quote
+from http import cookiejar
+from functools import wraps
 
-@contextmanager
-def scoped_import():
-    lib_dir = os.path.join(os.path.dirname(__file__), "lib")
-    sys.path.insert(0, lib_dir)
-    try:
-        yield
-    finally:
-        if lib_dir in sys.path:
-            sys.path.remove(lib_dir)
+lib_dir = os.path.join(os.path.dirname(__file__), "lib")
+if lib_dir not in sys.path:
+    sys.path.append(lib_dir)
 
-with scoped_import():
-    import markdown
+try:
+    import markdown as markdown_lib
+except:
+    markdown_lib = None
 
 import addonHandler
 import globalPluginHandler
@@ -41,11 +38,179 @@ import textInfos
 import tones
 import NVDAObjects.behaviors
 import scriptHandler
+import baseObject
 
 log = logging.getLogger(__name__)
 addonHandler.initTranslation()
 
 ADDON_NAME = addonHandler.getCodeAddon().manifest["summary"]
+
+# --- Helper for Layer Logic ---
+
+def finally_(func, final):
+    @wraps(func)
+    def new(*args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        finally:
+            final()
+    return new
+
+# --- Helper Functions ---
+
+def clean_markdown(text):
+    if not text: return ""
+    text = re.sub(r'\*\*|__|[*_]', '', text)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'```', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    text = re.sub(r'^\s*-\s+', '', text, flags=re.MULTILINE)
+    return text.strip()
+
+def text_to_html(text, full_page=False):
+    if not text: return ""
+    
+    html_body = ""
+    if markdown_lib:
+        try:
+            html_body = markdown_lib.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
+        except:
+            html_body = None
+    
+    if not html_body:
+        safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        
+        safe_text = re.sub(r'^###\s+(.*?)$', r'<h3>\1</h3>', safe_text, flags=re.MULTILINE)
+        safe_text = re.sub(r'^##\s+(.*?)$', r'<h2>\1</h2>', safe_text, flags=re.MULTILINE)
+        safe_text = re.sub(r'^#\s+(.*?)$', r'<h1>\1</h1>', safe_text, flags=re.MULTILINE)
+        
+        safe_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', safe_text)
+        
+        safe_text = re.sub(r'^\s*-\s+(.*?)$', r'<li>\1</li>', safe_text, flags=re.MULTILINE)
+        
+        html_body = safe_text.replace("\n", "<br>")
+
+    if not full_page:
+        return html_body
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{ADDON_NAME} Result</title>
+        <style>
+            body {{ font-family: "Segoe UI", Arial, sans-serif; line-height: 1.6; padding: 20px; color: #333; max-width: 800px; margin: 0 auto; }}
+            h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+            pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; font-family: Consolas, monospace; }}
+            code {{ background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
+            strong, b {{ color: #000; font-weight: bold; }}
+            li {{ margin-bottom: 5px; }}
+        </style>
+    </head>
+    <body>
+        {html_body}
+    </body>
+    </html>
+    """
+
+def get_mime_type(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.pdf': return 'application/pdf'
+    if ext in ['.jpg', '.jpeg']: return 'image/jpeg'
+    if ext == '.png': return 'image/png'
+    if ext == '.webp': return 'image/webp'
+    if ext in ['.tif', '.tiff']: return 'image/jpeg'
+    if ext == '.mp3': return 'audio/mpeg'
+    if ext == '.wav': return 'audio/wav'
+    if ext == '.ogg': return 'audio/ogg'
+    if ext == '.mp4': return 'video/mp4'
+    return 'application/octet-stream'
+
+def show_error_dialog(message):
+    # Translators: Title of the error dialog box
+    title = _("{name} Error").format(name=ADDON_NAME)
+    wx.CallAfter(gui.messageBox, message, title, wx.OK | wx.ICON_ERROR)
+
+def send_ctrl_v():
+    try:
+        user32 = ctypes.windll.user32
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        KEYEVENTF_KEYUP = 0x0002
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+    except: pass
+
+def process_tiff_pages(path):
+    pages_data = []
+    no_log = wx.LogNull()
+    index = 0
+    while index < 100:
+        try:
+            img = wx.Image(path, wx.BITMAP_TYPE_TIFF, index)
+            if not img.IsOk():
+                break     
+            stream = io.BytesIO()
+            img.SaveFile(stream, wx.BITMAP_TYPE_JPEG)
+            pages_data.append(base64.b64encode(stream.getvalue()).decode('utf-8'))
+            index += 1
+        except:
+            break
+    if not pages_data:
+        try:
+            img = wx.Image(path, wx.BITMAP_TYPE_ANY)
+            if img.IsOk():
+                stream = io.BytesIO()
+                img.SaveFile(stream, wx.BITMAP_TYPE_JPEG)
+                pages_data.append(base64.b64encode(stream.getvalue()).decode('utf-8'))
+        except: pass
+    return pages_data
+
+def get_instagram_download_link(insta_url):
+    cj = cookiejar.CookieJar()
+    opener = request.build_opener(request.HTTPCookieProcessor(cj))
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+        'Accept': '*/*',
+        'Referer': 'https://anon-viewer.com/',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    opener.addheaders = list(headers.items())
+    try:
+        opener.open("https://anon-viewer.com/", timeout=120)
+        encoded_url = quote(insta_url, safe='')
+        api_url = f"https://anon-viewer.com/content.php?url={encoded_url}"
+        response = opener.open(api_url, timeout=60)
+        if response.getcode() == 200:
+            data = json.loads(response.read().decode('utf-8'))
+            html_text = data.get('html', '')
+            match = re.search(r'href="([^"]+anon-viewer\.com/media\.php\?media=[^"]+)"', html_text)
+            if match:
+                final_link = match.group(1).replace('&amp;', '&')
+                return final_link
+    except Exception:
+        pass
+    return None
+
+def _download_temp_video(url):
+    try:
+        req = request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with request.urlopen(req, timeout=60) as response:
+            fd, path = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            with open(path, 'wb') as f:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk: break
+                    f.write(chunk)
+            return path
+    except:
+        pass
+    return None
 
 # --- Configuration ---
 
@@ -62,12 +227,12 @@ MODELS = [
     (_("[Free]") + " Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
 
     # --- 3. High Intelligence (Paid/Pro/Preview) ---
-    # Translators: AI Model info. [Pro] = High intelligence/Paid. (Preview) = Experimental version.
+    # Translators: AI Model info. [Pro] = High intelligence/Paid tier. (Preview) = Experimental version.
     (_("[Pro]") + " Gemini 3.0 Pro " + _("(Preview)"), "gemini-3-pro-preview"),
     (_("[Pro]") + " Gemini 2.5 Pro", "gemini-2.5-pro"),
 
     # --- 4. Legacy (Older Versions) ---
-    # Translators: AI Model info. [Legacy] = Older versions.
+    # Translators: AI Model info. [Legacy] = Older versions that are still available.
     (_("[Legacy]") + " Gemini 2.0 Flash", "gemini-2.0-flash"),
     (_("[Legacy]") + " Gemini 2.0 Flash Lite", "gemini-2.0-flash-lite"),
 ]
@@ -105,100 +270,8 @@ confspec = {
 
 GITHUB_REPO = "mahmoodhozhabri/VisionAssistantPro"
 
-# --- Helpers ---
-
-def clean_markdown(text):
-    if not text: return ""
-    text = re.sub(r'\*\*|__|[*_]', '', text)
-    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```', '', text)
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    text = re.sub(r'^\s*-\s+', '', text, flags=re.MULTILINE)
-    return text.strip()
-
-def text_to_html(text, full_page=False):
-    if not text: return ""
-    
-    try:
-        html_body = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
-    except:
-        html_body = markdown.markdown(text)
-        html_body = html_body.replace("\n", "<br>")
-        
-    if not full_page:
-        return html_body
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{ADDON_NAME} Result</title>
-        <style>
-            body {{ font-family: "Segoe UI", Arial, sans-serif; line-height: 1.6; padding: 20px; color: #333; max-width: 800px; margin: 0 auto; }}
-            h1, h2, h3 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
-            pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; font-family: Consolas, monospace; }}
-            code {{ background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: Consolas, monospace; }}
-            strong {{ color: #000; }}
-            li {{ margin-bottom: 5px; }}
-        </style>
-    </head>
-    <body>
-        {html_body}
-    </body>
-    </html>
-    """
-
-def get_mime_type(path):
-    ext = os.path.splitext(path)[1].lower()
-    if ext == '.pdf': return 'application/pdf'
-    if ext in ['.jpg', '.jpeg']: return 'image/jpeg'
-    if ext == '.png': return 'image/png'
-    if ext == '.webp': return 'image/webp'
-    if ext in ['.tif', '.tiff']: return 'image/jpeg'
-    if ext == '.mp3': return 'audio/mpeg'
-    if ext == '.wav': return 'audio/wav'
-    if ext == '.ogg': return 'audio/ogg'
-    return 'application/octet-stream'
-
-def show_error_dialog(message):
-    # Translators: Title of the error dialog box
-    title = _("{name} Error").format(name=ADDON_NAME)
-    wx.CallAfter(gui.messageBox, message, title, wx.OK | wx.ICON_ERROR)
-
-def send_ctrl_v():
-    try:
-        user32 = ctypes.windll.user32
-        VK_CONTROL = 0x11
-        VK_V = 0x56
-        KEYEVENTF_KEYUP = 0x0002
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-    except: pass
-
-def process_tiff_pages(path):
-    pages_data = []
-    no_log = wx.LogNull() 
-    try:
-        img_count = wx.Image.GetImageCount(path, wx.BITMAP_TYPE_TIFF)
-        if img_count == 0: img_count = 1
-        
-        for i in range(img_count):
-            try:
-                img = wx.Image(path, wx.BITMAP_TYPE_TIFF, i)
-                if img.IsOk():
-                    stream = io.BytesIO()
-                    img.SaveFile(stream, wx.BITMAP_TYPE_JPEG)
-                    pages_data.append(base64.b64encode(stream.getvalue()).decode('utf-8'))
-            except: continue
-    except: pass
-    return pages_data
-
 PROMPT_TRANSLATE = """
-Task: Translate the text below.
+Task: Translate the text below to "{target_lang}".
 
 Configuration:
 - Target Language: "{target_lang}"
@@ -207,12 +280,13 @@ Configuration:
 
 Rules:
 1. DEFAULT: Translate the input strictly to "{target_lang}".
-2. EXCEPTION: If (and ONLY if) the input is already completely in "{target_lang}" AND "Smart Swap" is True, then translate to "{swap_target}".
+2. MIXED CONTENT: If the text contains mixed languages (e.g., Arabic content with English UI terms like 'Reply', 'From', 'Forwarded'), translate EVERYTHING to "{target_lang}".
+3. EXCEPTION: If (and ONLY if) the input is already completely in "{target_lang}" AND "Smart Swap" is True, then translate to "{swap_target}".
 
 Constraints:
 - Output ONLY the translation.
-- Do NOT explain your logic or add notes.
-- Do NOT translate technical terms, code, or protocol names.
+- Do NOT translate actual programming code (Python, C++, etc.) or URLs.
+- Translate ALL UI elements, menus, and interface labels.
 
 Input Text:
 {text_content}
@@ -497,25 +571,25 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         # --- Connection Group ---
         # Translators: Title of the settings group for connection and updates
         groupLabel = _("Connection")
-        connectionBox = wx.StaticBox(self, label=groupLabel)
-        connectionSizer = wx.StaticBoxSizer(connectionBox, wx.VERTICAL)
-        cHelper = gui.guiHelper.BoxSizerHelper(connectionBox, sizer=connectionSizer)
+        self.connectionBox = wx.StaticBox(self, label=groupLabel)
+        connectionSizer = wx.StaticBoxSizer(self.connectionBox, wx.VERTICAL)
+        cHelper = gui.guiHelper.BoxSizerHelper(self.connectionBox, sizer=connectionSizer)
 
         apiSizer = wx.BoxSizer(wx.HORIZONTAL)
         # Translators: Label for API Key input
-        apiLabel = wx.StaticText(connectionBox, label=_("Gemini API Key:"))
+        apiLabel = wx.StaticText(self.connectionBox, label=_("Gemini API Key:"))
         apiSizer.Add(apiLabel, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         api_value = config.conf["VisionAssistant"]["api_key"]
-        self.apiKeyCtrl_hidden = wx.TextCtrl(connectionBox, value=api_value, style=wx.TE_PASSWORD)
-        self.apiKeyCtrl_visible = wx.TextCtrl(connectionBox, value=api_value)
+        self.apiKeyCtrl_hidden = wx.TextCtrl(self.connectionBox, value=api_value, style=wx.TE_PASSWORD)
+        self.apiKeyCtrl_visible = wx.TextCtrl(self.connectionBox, value=api_value)
         self.apiKeyCtrl_visible.Hide()
         
         apiSizer.Add(self.apiKeyCtrl_hidden, 1, wx.EXPAND | wx.RIGHT, 5)
         apiSizer.Add(self.apiKeyCtrl_visible, 1, wx.EXPAND | wx.RIGHT, 5)
         
         # Translators: Checkbox to toggle API Key visibility
-        self.showApiCheck = wx.CheckBox(connectionBox, label=_("Show API Key"))
+        self.showApiCheck = wx.CheckBox(self.connectionBox, label=_("Show API Key"))
         self.showApiCheck.Bind(wx.EVT_CHECKBOX, self.onToggleApiVisibility)
         apiSizer.Add(self.showApiCheck, 0, wx.ALIGN_CENTER_VERTICAL)
         
@@ -538,19 +612,19 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.proxyUrl.Value = config.conf["VisionAssistant"]["proxy_url"]
 
         # Translators: Checkbox to enable/disable automatic update checks on NVDA startup
-        self.checkUpdateStartup = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Check for updates on startup")))
+        self.checkUpdateStartup = cHelper.addItem(wx.CheckBox(self.connectionBox, label=_("Check for updates on startup")))
         self.checkUpdateStartup.Value = config.conf["VisionAssistant"]["check_update_startup"]
         
         # Translators: Checkbox to toggle markdown cleaning in chat windows
-        self.cleanMarkdown = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Clean Markdown in Chat")))
+        self.cleanMarkdown = cHelper.addItem(wx.CheckBox(self.connectionBox, label=_("Clean Markdown in Chat")))
         self.cleanMarkdown.Value = config.conf["VisionAssistant"]["clean_markdown_chat"]
 
         # Translators: Checkbox to enable copying AI responses to clipboard
-        self.copyToClipboard = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Copy AI responses to clipboard")))
+        self.copyToClipboard = cHelper.addItem(wx.CheckBox(self.connectionBox, label=_("Copy AI responses to clipboard")))
         self.copyToClipboard.Value = config.conf["VisionAssistant"]["copy_to_clipboard"]
 
         # Translators: Checkbox to skip chat window and only speak AI responses
-        self.skipChatDialog = cHelper.addItem(wx.CheckBox(connectionBox, label=_("Direct Output (No Chat Window)")))
+        self.skipChatDialog = cHelper.addItem(wx.CheckBox(self.connectionBox, label=_("Direct Output (No Chat Window)")))
         self.skipChatDialog.Value = config.conf["VisionAssistant"]["skip_chat_dialog"]
 
         settingsSizer.Add(connectionSizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -676,9 +750,38 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.refine_menu_dlg = None
         self.vision_dlg = None
         self.doc_dlg = None
+        self.toggling = False
         
         if config.conf["VisionAssistant"]["check_update_startup"]:
             self.update_timer = wx.CallLater(10000, self.updater.check_for_updates, True)
+
+    def getScript(self, gesture):
+        if not self.toggling:
+            return super(GlobalPlugin, self).getScript(gesture)
+        
+        script = super(GlobalPlugin, self).getScript(gesture)
+        if not script:
+            script = finally_(self.script_error, self.finish)
+        return finally_(script, self.finish)
+
+    def finish(self):
+        self.toggling = False
+        self.clearGestureBindings()
+        self.bindGestures(self.__gestures)
+
+    def script_error(self, gesture):
+        tones.beep(120, 100)
+
+    # Translators: Script description for Input Gestures dialog
+    @scriptHandler.script(description=_("Activates the Command Layer for quick access to all features."))
+    def script_activateLayer(self, gesture):
+        if self.toggling:
+            self.script_error(gesture)
+            return
+        
+        self.bindGestures(self.__VisionGestures)
+        self.toggling = True
+        tones.beep(500, 100)
 
     def terminate(self):
         try: gui.settingsDialogs.NVDASettingsDialog.categoryClasses.remove(SettingsPanel)
@@ -719,6 +822,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Announces the current status of the add-on."))
     def script_announceStatus(self, gesture):
+        if self.toggling: self.finish()
         # Translators: Status message when the add-on is doing nothing
         idle_msg = _("Idle")
         msg = self.current_status if self.current_status else idle_msg
@@ -738,46 +842,78 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         proxy_url = config.conf["VisionAssistant"]["proxy_url"].strip()
         base_url = proxy_url.rstrip('/') if proxy_url else "https://generativelanguage.googleapis.com"
         
-        upload_url = f"{base_url}/upload/v1beta/files?key={api_key}"
-        
         try:
             file_size = os.path.getsize(file_path)
-            
             filename = os.path.basename(file_path)
-            safe_filename = quote(filename)
             
-            headers = {
-                "X-Goog-Upload-Protocol": "raw",
-                "X-Goog-Upload-Command": "start, upload, finalize",
+            initial_url = f"{base_url}/upload/v1beta/files?key={api_key}"
+            headers_init = {
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
                 "X-Goog-Upload-Header-Content-Length": str(file_size),
-                "X-Goog-Upload-File-Name": safe_filename,
-                "Content-Type": mime_type
+                "X-Goog-Upload-Header-Content-Type": mime_type,
+                "Content-Type": "application/json"
             }
+            metadata = {"file": {"display_name": filename}}
+            req_init = request.Request(initial_url, data=json.dumps(metadata).encode('utf-8'), headers=headers_init, method="POST")
             
+            with request.urlopen(req_init, timeout=30) as response:
+                upload_url = response.headers.get("x-goog-upload-url")
+                
+            if not upload_url: return None
+
             with open(file_path, "rb") as f:
                 file_data = f.read()
                 
-            req = request.Request(upload_url, data=file_data, headers=headers, method="POST")
-            with request.urlopen(req, timeout=600) as response:
+            headers_upload = {
+                "Content-Length": str(file_size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize"
+            }
+            req_upload = request.Request(upload_url, data=file_data, headers=headers_upload, method="POST")
+            
+            file_name_id = None
+            with request.urlopen(req_upload, timeout=300) as response:
                 if response.status == 200:
                     res_json = json.loads(response.read().decode('utf-8'))
-                    return res_json.get('file', {}).get('uri')
+                    file = res_json.get('file', {})
+                    file_name_id = file.get('name')
+                    
+            if not file_name_id: return None
+
+            check_url = f"{base_url}/v1beta/{file_name_id}?key={api_key}"
+            for _ in range(30): # Poll for up to 60s
+                try:
+                    with request.urlopen(check_url, timeout=10) as response:
+                        state_data = json.loads(response.read().decode('utf-8'))
+                        state = state_data.get('state')
+                        if state == "ACTIVE":
+                            return state_data.get('uri')
+                        elif state == "FAILED":
+                            return None
+                except: pass
+                time.sleep(2)
+                
+            return None 
+
         except error.URLError as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("Upload Connection Error: {reason}").format(reason=e.reason)
             self.report_status(msg)
             show_error_dialog(msg)
+            return None
         except error.HTTPError as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("Upload Server Error {code}: {reason}").format(code=e.code, reason=e.reason)
             self.report_status(msg)
             show_error_dialog(msg)
+            return None
         except Exception as e:
             # Translators: Message of a dialog which may pop up while trying to upload a file
             msg = _("File Upload Error: {error}").format(error=e)
             self.report_status(msg)
             show_error_dialog(msg)
-        return None
+            return None
 
     def _call_gemini(self, prompt_or_contents, attachments=[], json_mode=False, raise_errors=False):
         api_key = config.conf["VisionAssistant"]["api_key"].strip()
@@ -896,6 +1032,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Records voice, transcribes it using AI, and types the result."))
     def script_smartDictation(self, gesture):
+        if self.toggling: self.finish()
         if not self.is_recording:
             self.is_recording = True
             tones.beep(800, 100)
@@ -984,6 +1121,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Translates the selected text or navigator object."))
     def script_translateSmart(self, gesture):
+        if self.toggling: self.finish()
         text = self._get_text_smart()
         
         if not text:
@@ -1084,6 +1222,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Opens a menu to Explain, Summarize, or Fix the selected text."))
     def script_refineText(self, gesture):
+        if self.toggling: self.finish()
         if self.refine_menu_dlg:
             self.refine_menu_dlg.Raise()
             self.refine_menu_dlg.SetFocus()
@@ -1216,11 +1355,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             for f_path in file_paths:
                 try:
                     mime_type = get_mime_type(f_path)
+                    ext = os.path.splitext(f_path)[1].lower()
                     
                     if "[file_ocr]" in prompt_text:
-                        file_uri = self._upload_file_to_gemini(f_path, mime_type)
-                        if file_uri:
-                             attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+                        if ext in ['.tif', '.tiff']:
+                            pages_data = process_tiff_pages(f_path)
+                            for p_data in pages_data:
+                                attachments.append({'mime_type': 'image/jpeg', 'data': p_data})
+                        else:
+                            file_uri = self._upload_file_to_gemini(f_path, mime_type)
+                            if file_uri:
+                                 attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
                     
                     elif "[file_read]" in prompt_text:
                         file_uri = self._upload_file_to_gemini(f_path, mime_type)
@@ -1304,6 +1449,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Recognizes text from a selected image or PDF file."))
     def script_fileOCR(self, gesture):
+        if self.toggling: self.finish()
         wx.CallLater(100, self._open_file_ocr_dialog)
 
     def _open_file_ocr_dialog(self):
@@ -1326,10 +1472,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         attachments = []
         for path in paths:
             try:
-                mime_type = get_mime_type(path)
-                file_uri = self._upload_file_to_gemini(path, mime_type)
-                if file_uri:
-                    attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
+                ext = os.path.splitext(path)[1].lower()
+                if ext in ['.tif', '.tiff']:
+                    pages_data = process_tiff_pages(path)
+                    for p_data in pages_data:
+                        attachments.append({'mime_type': 'image/jpeg', 'data': p_data})
+                else:
+                    mime_type = get_mime_type(path)
+                    file_uri = self._upload_file_to_gemini(path, mime_type)
+                    if file_uri:
+                        attachments.append({'mime_type': mime_type, 'file_uri': file_uri})
             except: pass
         
         if not attachments:
@@ -1348,6 +1500,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Allows asking questions about a selected document (PDF/Text/Image)."))
     def script_analyzeDocument(self, gesture):
+        if self.toggling: self.finish()
         wx.CallLater(100, self._open_doc_dialog)
 
     def _open_doc_dialog(self):
@@ -1365,7 +1518,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         file_uri = self._upload_file_to_gemini(path, mime_type)
         
         if file_uri:
-            att = [{'mime_type': mime_type, 'file_uri': file_uri}]
+            att = [{'mime_type': 'mime_type', 'file_uri': file_uri}]
             self.current_status = _("Idle")
             
             if config.conf["VisionAssistant"]["skip_chat_dialog"]:
@@ -1383,6 +1536,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # Translators: Label for the text entry in direct question dialog
         msg = _("Enter your question:")
         dlg = wx.TextEntryDialog(gui.mainFrame, msg, title)
+        dlg.Raise()
         if dlg.ShowModal() == wx.ID_OK:
             q = dlg.GetValue()
             if q.strip():
@@ -1413,30 +1567,32 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         def doc_callback(ctx_atts, q, history, dum2):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
-            atts = ctx_atts if ctx_atts else []
             
             system_instr = (
                 f"STRICTLY Respond in {lang}. "
-                "Use Markdown formatting (bold, headings, lists). "
-                "Analyze both text and visual elements (images/charts) to answer the request."
+                "Use Markdown formatting. "
+                "Analyze the attached content to answer."
             )
             
-            full_prompt = f"{q}\n\n[{system_instr}]"
-            
-            current_user_msg = {"role": "user", "parts": [{"text": full_prompt}]}
+            context_parts = [{"text": f"Context: {system_instr}"}]
+            if ctx_atts:
+                for att in ctx_atts:
+                    if 'file_uri' in att:
+                        context_parts.append({"file_data": {"mime_type": att['mime_type'], "file_uri": att['file_uri']}})
+                    elif 'data' in att:
+                        context_parts.append({"inline_data": {"mime_type": att['mime_type'], "data": att['data']}})
             
             messages = []
-            if not history:
-                parts = [{"text": f"Analyze this content. {full_prompt}"}]
-                for att in atts:
-                    if 'file_uri' in att:
-                        parts.append({"file_data": {"mime_type": att['mime_type'], "file_uri": att['file_uri']}})
-                
-                return self._call_gemini_safe([{"parts": parts}]), None
-            else:
+            
+            messages.append({"role": "user", "parts": context_parts})
+            messages.append({"role": "model", "parts": [{"text": "Context received. Ready for questions."}]})
+
+            if history:
                 messages.extend(history)
-                messages.append(current_user_msg)
-                return self._call_gemini_safe(messages), None
+            
+            messages.append({"role": "user", "parts": [{"text": q}]})
+            
+            return self._call_gemini_safe(messages), None
             
         # Translators: Dialog title for a Chat dialog
         self.doc_dlg = VisionQADialog(
@@ -1455,11 +1611,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Performs OCR and description on the entire screen."))
     def script_ocrFullScreen(self, gesture):
+        if self.toggling: self.finish()
         self._start_vision(True)
 
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Describes the current object (Navigator Object)."))
     def script_describeObject(self, gesture):
+        if self.toggling: self.finish()
         self._start_vision(False)
 
     def _start_vision(self, full):
@@ -1533,6 +1691,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Transcribes a selected audio file."))
     def script_transcribeAudio(self, gesture):
+        if self.toggling: self.finish()
         wx.CallLater(100, self._open_audio)
 
     def _open_audio(self):
@@ -1559,7 +1718,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             lang = config.conf["VisionAssistant"]["ai_response_language"]
             p = f"Transcribe this audio in {lang}."
             
-            att = [{'mime_type': 'audio/wav', 'file_uri': file_uri}]
+            att = [{'mime_type': mime_type, 'file_uri': file_uri}]
             res = self._call_gemini_safe(p, attachments=att)
             
             if res:
@@ -1575,8 +1734,100 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.current_status = _("Idle")
 
     # Translators: Script description for Input Gestures dialog
+    @scriptHandler.script(description=_("Analyzes a YouTube video URL."))
+    def script_analyzeOnlineVideo(self, gesture):
+        if self.toggling: self.finish()
+        wx.CallLater(100, self._open_video_dialog)
+
+    def _open_video_dialog(self):
+        # Translators: Title for the YouTube URL entry dialog
+        title = _("YouTube / Instagram Analysis")
+        # Translators: Label for the text entry in YouTube dialog
+        msg = _("Enter Video URL (YouTube/Instagram):")
+        dlg = wx.TextEntryDialog(gui.mainFrame, msg, title)
+        dlg.Raise()
+        if dlg.ShowModal() == wx.ID_OK:
+            url = dlg.GetValue()
+            if url.strip():
+                threading.Thread(target=self._thread_video, args=(url,), daemon=True).start()
+        dlg.Destroy()
+
+    def _thread_video(self, url):
+        # Translators: Message reported when processing YouTube link
+        msg = _("Processing Video...")
+        wx.CallAfter(self.report_status, msg)
+        
+        lang = config.conf["VisionAssistant"]["ai_response_language"]
+        p = PROMPT_VIDEO_ANALYSIS.format(target_lang=lang)
+
+        chat_attachments = []
+
+        if "instagram.com" in url:
+            direct_link = get_instagram_download_link(url)
+            if not direct_link:
+                # Translators: Error message when Instagram video link cannot be found
+                wx.CallAfter(self.report_status, _("Error: Could not extract Instagram video."))
+                return
+            
+            # Translators: Message reported when downloading Instagram video
+            wx.CallAfter(self.report_status, _("Downloading Video..."))
+            temp_path = _download_temp_video(direct_link)
+            
+            if not temp_path:
+                # Translators: Error message when video download fails
+                wx.CallAfter(self.report_status, _("Error: Download failed."))
+                return
+
+            # Translators: Message reported when uploading video to AI
+            wx.CallAfter(self.report_status, _("Uploading to AI..."))
+            try:
+                file_uri = self._upload_file_to_gemini(temp_path, "video/mp4")
+                if file_uri:
+                    chat_attachments = [{'mime_type': 'video/mp4', 'file_uri': file_uri}]
+                    
+                    # Translators: Message reported when AI is analyzing the video
+                    wx.CallAfter(self.report_status, _("Analyzing..."))
+                    
+                    parts = [
+                        {"file_data": {"mime_type": "video/mp4", "file_uri": file_uri}},
+                        {"text": p}
+                    ]
+                    res = self._call_gemini_safe([{"parts": parts}])
+                    
+                    if res:
+                        self.current_status = _("Idle")
+                        if not self._handle_direct_output(res):
+                            wx.CallAfter(self._open_doc_chat_dialog, res, chat_attachments, "", res)
+                    else:
+                        self.current_status = _("Idle")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+        else:
+            # Translators: Message reported when AI is analyzing the video
+            wx.CallAfter(self.report_status, _("Analyzing..."))
+            
+            chat_attachments = [{'mime_type': 'video/mp4', 'file_uri': url}]
+            
+            parts = [
+                {"file_data": {"mime_type": "video/mp4", "file_uri": url}},
+                {"text": p}
+            ]
+            
+            res = self._call_gemini_safe([{"parts": parts}])
+            
+            if res:
+                self.current_status = _("Idle")
+                if not self._handle_direct_output(res):
+                    wx.CallAfter(self._open_doc_chat_dialog, res, chat_attachments, "", res)
+            else:
+                self.current_status = _("Idle")
+
+    # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Attempts to solve a CAPTCHA on the screen or navigator object."))
     def script_solveCaptcha(self, gesture):
+        if self.toggling: self.finish()
         mode = config.conf["VisionAssistant"]["captcha_mode"]
         if mode == 'fullscreen': d, w, h = self._capture_fullscreen()
         else: d, w, h = self._capture_navigator()
@@ -1598,14 +1849,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.report_status(msg)
         
     def _thread_cap(self, d, is_gov):
-        p = "Blind user. Return CAPTCHA code only."
+        p = "Blind user. Return CAPTCHA code only. If NO CAPTCHA is detected in the image, strictly return: [[[NO_CAPTCHA]]]"
         if is_gov: p += " Read 5 Persian digits, convert to English."
         else: p += " Convert to English digits."
         
         r = self._call_gemini_safe(p, attachments=[{'mime_type': 'image/png', 'data': d}])
-        if r: 
+        if r:
             self.current_status = _("Idle")
-            wx.CallAfter(self._finish_captcha, r)
+            if "[[[NO_CAPTCHA]]]" in r:
+                # Translators: Message reported when AI cannot find any CAPTCHA in the image
+                wx.CallAfter(self.report_status, _("No CAPTCHA detected."))
+            else:
+                wx.CallAfter(self._finish_captcha, r)
         else: 
             # Translators: Message reported when calling the CAPTCHA solving command
             msg = _("Failed.")
@@ -1620,9 +1875,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         msg = _("Captcha: {text}").format(text=text)
         wx.CallLater(200, self.report_status, msg)
 
+    # --- Update Management ---
+
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Checks for updates manually."))
     def script_checkUpdate(self, gesture):
+        if self.toggling: self.finish()
         # Translators: Message reported when calling the update command
         msg = _("Checking for updates...")
         self.report_status(msg)
@@ -1649,19 +1907,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             bmp.ConvertToImage().SaveFile(s, wx.BITMAP_TYPE_PNG)
             return base64.b64encode(s.getvalue()).decode('utf-8'),w,h
         except: return None,0,0
-
-    # Translators: Script description for Input Gestures dialog
-    @scriptHandler.script(description=_("Announces the last received translation."))
-    def script_readLastTranslation(self, gesture):
-        if self.last_translation: ui.message(f"Last: {self.last_translation}")
-        else: 
-            # Translators: Message called when trying to repeat the last translation
-            msg = _("No history.")
-            self.report_status(msg)
     
     # Translators: Script description for Input Gestures dialog
     @scriptHandler.script(description=_("Translates the text currently in the clipboard."))
     def script_translateClipboard(self, gesture):
+        if self.toggling: self.finish()
         t = api.getClipData()
         if t: 
             # Translators: Message when calling the command to translate from clipboard
@@ -1674,17 +1924,21 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self.report_status(msg)
 
     __gestures = {
-        "kb:NVDA+control+shift+t": "translateSmart",
-        "kb:NVDA+control+shift+r": "refineText",
-        "kb:NVDA+control+shift+o": "ocrFullScreen",
-        "kb:NVDA+control+shift+v": "describeObject",
-        "kb:NVDA+control+shift+d": "analyzeDocument",
-        "kb:NVDA+control+shift+f": "fileOCR",
-        "kb:NVDA+control+shift+a": "transcribeAudio",
-        "kb:NVDA+control+shift+c": "solveCaptcha",
-        "kb:NVDA+control+shift+l": "readLastTranslation",
-        "kb:NVDA+control+shift+y": "translateClipboard",
-        "kb:NVDA+control+shift+s": "smartDictation",
-        "kb:NVDA+control+shift+u": "checkUpdate",
-        "kb:NVDA+control+shift+i": "announceStatus",
+        "kb:NVDA+shift+v": "activateLayer",
+    }
+    
+    __VisionGestures = {
+        "kb:t": "translateSmart",
+        "kb:r": "refineText",
+        "kb:o": "ocrFullScreen",
+        "kb:v": "describeObject",
+        "kb:d": "analyzeDocument",
+        "kb:f": "fileOCR",
+        "kb:a": "transcribeAudio",
+        "kb:c": "solveCaptcha",
+        "kb:l": "announceStatus",
+        "kb:s": "smartDictation",
+        "kb:u": "checkUpdate",
+        "kb:shift+t": "translateClipboard",
+        "kb:shift+v": "analyzeOnlineVideo",
     }
